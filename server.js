@@ -12,11 +12,14 @@ let browser;
 // START BROWSER ON SERVER START
 (async () => {
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-
+   browser = await chromium.launch({
+  headless: true,
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage"
+  ]
+});
     console.log("Browser launched");
   } catch (err) {
     console.error("Browser failed to launch", err);
