@@ -3,12 +3,15 @@ const { chromium } = require("playwright");
 
 const app = express();
 
+// -------------------------
+// STATE
+// -------------------------
 let browser = null;
 let browserReady = false;
 
-// -------------------
-// HEALTH CHECK (IMPORTANT)
-// -------------------
+// -------------------------
+// HEALTH CHECK (REQUIRED FOR RAILWAY)
+// -------------------------
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -16,9 +19,9 @@ app.get("/health", (req, res) => {
   });
 });
 
-// -------------------
-// INIT BROWSER SAFELY (NO RACE CONDITION)
-// -------------------
+// -------------------------
+// START BROWSER (SAFE)
+// -------------------------
 async function startBrowser() {
   try {
     browser = await chromium.launch({
@@ -33,17 +36,17 @@ async function startBrowser() {
     browserReady = true;
     console.log("Browser READY");
   } catch (err) {
-    console.error("Browser failed:", err);
     browserReady = false;
+    console.error("Browser launch failed:", err);
   }
 }
 
 startBrowser();
 
-// -------------------
-// SCRAPER
-// -------------------
-async function scrape(query) {
+// -------------------------
+// SCRAPER FUNCTION (SAFE + TIMEOUT PROTECTED)
+// -------------------------
+async function scrapeJumia(query) {
   const page = await browser.newPage();
 
   try {
@@ -55,7 +58,8 @@ async function scrape(query) {
       }
     );
 
-    await page.waitForSelector(".prd", { timeout: 8000 }).catch(() => {});
+    // DO NOT HARD BLOCK
+    await page.waitForSelector(".prd", { timeout: 6000 }).catch(() => {});
 
     const results = await page.evaluate(() => {
       return Array.from(document.querySelectorAll(".prd")).map(item => ({
@@ -72,9 +76,9 @@ async function scrape(query) {
   }
 }
 
-// -------------------
-// API ROUTE
-// -------------------
+// -------------------------
+// API ROUTE (NO HANGS, NO 502)
+// -------------------------
 app.get("/api/search", async (req, res) => {
   const query = req.query.q;
 
@@ -84,24 +88,39 @@ app.get("/api/search", async (req, res) => {
 
   if (!browserReady) {
     return res.status(503).json({
-      error: "Browser still starting, retry in a few seconds"
+      error: "Browser still starting, try again"
     });
   }
 
   try {
-    const results = await scrape(query);
-    res.json(results);
+    // HARD SAFETY TIMEOUT (prevents Railway 502)
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Request timeout")), 12000)
+    );
+
+    const scrape = scrapeJumia(query);
+
+    const result = await Promise.race([scrape, timeout]);
+
+    res.json(result);
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Scraping failed" });
+    console.error("Scrape error:", err.message);
+
+    // NEVER crash Railway
+    res.status(200).json({
+      error: "scrape_failed",
+      message: err.message,
+      data: []
+    });
   }
 });
 
-// -------------------
-// START SERVER (CRITICAL FOR RAILWAY)
-// -------------------
+// -------------------------
+// START SERVER (IMPORTANT)
+// -------------------------
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port", PORT);
+  console.log(`Server running on port ${PORT}`);
 });
