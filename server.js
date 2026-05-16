@@ -3,14 +3,10 @@ const { chromium } = require("playwright");
 
 const app = express();
 
-// -------------------------
-// STATE
-// -------------------------
 let browser = null;
-let browserReady = false;
 
 // -------------------------
-// ROOT ROUTE (FIXES 502 WHEN OPENING URL)
+// ROOT (prevents confusion)
 // -------------------------
 app.get("/", (req, res) => {
   res.json({
@@ -24,41 +20,35 @@ app.get("/", (req, res) => {
 });
 
 // -------------------------
-// HEALTH CHECK (RAILWAY USES THIS A LOT)
+// HEALTH CHECK
 // -------------------------
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    browserReady
+    browserReady: !!browser
   });
 });
 
 // -------------------------
-// START BROWSER SAFELY
+// START BROWSER FIRST, THEN SERVER
 // -------------------------
 async function startBrowser() {
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage"
-      ]
-    });
+  console.log("Starting browser...");
 
-    browserReady = true;
-    console.log("Browser READY");
-  } catch (err) {
-    browserReady = false;
-    console.error("Browser failed to launch:", err);
-  }
+  browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage"
+    ]
+  });
+
+  console.log("Browser READY");
 }
 
-startBrowser();
-
 // -------------------------
-// SCRAPER FUNCTION
+// SAFE SCRAPER
 // -------------------------
 async function scrapeJumia(query) {
   const page = await browser.newPage();
@@ -90,7 +80,7 @@ async function scrapeJumia(query) {
 }
 
 // -------------------------
-// API ROUTE
+// API ROUTE (NO 503 ANYMORE)
 // -------------------------
 app.get("/api/search", async (req, res) => {
   const query = req.query.q;
@@ -99,9 +89,9 @@ app.get("/api/search", async (req, res) => {
     return res.status(400).json({ error: "Missing query" });
   }
 
-  if (!browserReady) {
-    return res.status(503).json({
-      error: "Browser still starting, try again shortly"
+  if (!browser) {
+    return res.status(500).json({
+      error: "Browser not initialized"
     });
   }
 
@@ -116,6 +106,7 @@ app.get("/api/search", async (req, res) => {
     ]);
 
     res.json(result);
+
   } catch (err) {
     console.error("Scrape error:", err.message);
 
@@ -128,10 +119,20 @@ app.get("/api/search", async (req, res) => {
 });
 
 // -------------------------
-// START SERVER (IMPORTANT FOR RAILWAY)
+// BOOTSTRAP (IMPORTANT FIX)
 // -------------------------
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
+(async () => {
+  try {
+    await startBrowser();
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+
+  } catch (err) {
+    console.error("Fatal startup error:", err);
+    process.exit(1);
+  }
+})();
