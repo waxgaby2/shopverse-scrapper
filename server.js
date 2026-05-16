@@ -4,9 +4,10 @@ const { chromium } = require("playwright");
 const app = express();
 
 let browser = null;
+let browserReady = false;
 
 // -------------------------
-// ROOT (prevents confusion)
+// ROOT
 // -------------------------
 app.get("/", (req, res) => {
   res.json({
@@ -20,67 +21,102 @@ app.get("/", (req, res) => {
 });
 
 // -------------------------
-// HEALTH CHECK
+// HEALTH
 // -------------------------
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    browserReady: !!browser
+    browserReady
   });
 });
 
 // -------------------------
-// START BROWSER FIRST, THEN SERVER
+// START BROWSER (UNCHANGED LOGIC STYLE)
 // -------------------------
-async function startBrowser() {
-  console.log("Starting browser...");
+(async () => {
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage"
+      ]
+    });
 
-  browser = await chromium.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage"
-    ]
-  });
-
-  console.log("Browser READY");
-}
+    browserReady = true;
+    console.log("Browser READY");
+  } catch (err) {
+    browserReady = false;
+    console.error("Browser failed:", err);
+  }
+})();
 
 // -------------------------
-// SAFE SCRAPER
+// SAFE SCRAPER (FIXED EMPTY JSON ISSUE)
 // -------------------------
 async function scrapeJumia(query) {
   const page = await browser.newPage();
 
   try {
-    await page.goto(
-      `https://www.jumia.com.ng/catalog/?q=${encodeURIComponent(query)}`,
-      {
-        waitUntil: "domcontentloaded",
-        timeout: 15000
-      }
-    );
+    const url = `https://www.jumia.com.ng/catalog/?q=${encodeURIComponent(query)}`;
 
-    await page.waitForSelector(".prd", { timeout: 6000 }).catch(() => {});
-
-    const results = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll(".prd")).map(item => ({
-        title: item.querySelector(".name")?.textContent?.trim() || "",
-        price: item.querySelector(".prc")?.textContent?.trim() || "",
-        image: item.querySelector("img")?.src || "",
-        link: item.querySelector("a")?.href || ""
-      }));
+    await page.goto(url, {
+      waitUntil: "networkidle",
+      timeout: 20000
     });
 
-    return results;
+    // wait for ANY possible product container
+    await page
+      .waitForSelector("article, .prd, .core, .sku", { timeout: 10000 })
+      .catch(() => {});
+
+    // extra delay to allow JS rendering (important on cloud)
+    await page.waitForTimeout(1500);
+
+    const results = await page.evaluate(() => {
+      const items = document.querySelectorAll("article, .prd, .core, .sku");
+
+      return Array.from(items).map((item) => {
+        const title =
+          item.querySelector("h3, .name, .name span")?.textContent?.trim() ||
+          "";
+
+        const price =
+          item.querySelector(".prc, .price, .amount")?.textContent?.trim() ||
+          "";
+
+        const image =
+          item.querySelector("img")?.getAttribute("data-src") ||
+          item.querySelector("img")?.src ||
+          "";
+
+        const link =
+          item.querySelector("a")?.href ||
+          "";
+
+        return {
+          title,
+          price,
+          image,
+          link
+        };
+      });
+    });
+
+    // filter out empty garbage rows
+    return results.filter(p => p.title || p.price || p.link);
+
+  } catch (err) {
+    console.error("Scrape error:", err.message);
+    return [];
   } finally {
     await page.close().catch(() => {});
   }
 }
 
 // -------------------------
-// API ROUTE (NO 503 ANYMORE)
+// API
 // -------------------------
 app.get("/api/search", async (req, res) => {
   const query = req.query.q;
@@ -89,50 +125,38 @@ app.get("/api/search", async (req, res) => {
     return res.status(400).json({ error: "Missing query" });
   }
 
-  if (!browser) {
-    return res.status(500).json({
-      error: "Browser not initialized"
+  if (!browserReady) {
+    return res.status(503).json({
+      error: "Browser still starting"
     });
   }
 
   try {
     const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Request timeout")), 12000)
+      setTimeout(() => reject(new Error("Request timeout")), 15000)
     );
 
-    const result = await Promise.race([
+    const data = await Promise.race([
       scrapeJumia(query),
       timeout
     ]);
 
-    res.json(result);
-
+    res.json(data);
   } catch (err) {
-    console.error("Scrape error:", err.message);
+    console.error(err.message);
 
     res.status(200).json({
       error: "scrape_failed",
-      message: err.message,
       data: []
     });
   }
 });
 
 // -------------------------
-// BOOTSTRAP (IMPORTANT FIX)
+// START SERVER
 // -------------------------
 const PORT = process.env.PORT || 3000;
 
-(async () => {
-  try {
-    await startBrowser();
-
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-
-  } catch (err) {
-    console.error("Fatal startup error:", err);
-    process.exit(1);
-  }
-})();
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+});
